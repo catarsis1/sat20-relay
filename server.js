@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
+import { randomUUID } from "crypto";
 
 const app = express();
 app.use(express.json());
 
-const transports = {};
+const sessions = new Map();
 
 function createServer() {
   const server = new McpServer({
@@ -26,28 +27,48 @@ app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     tool: "ping",
-    activeSessions: Object.keys(transports).length
+    activeSessions: sessions.size
   });
 });
 
-app.get("/sse", async (req, res) => {
-  const transport = new SSEServerTransport("/messages", res);
-  transports[transport.sessionId] = transport;
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+
+  if (sessionId && sessions.has(sessionId)) {
+    await sessions.get(sessionId).handleRequest(req, res);
+    return;
+  }
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+  });
 
   const server = createServer();
+  await server.connect(transport);
 
-  res.on("close", () => {
-    delete transports[transport.sessionId];
+  sessions.set(transport.sessionId, transport);
+
+  transport.on("close", () => {
+    sessions.delete(transport.sessionId);
   });
 
-  await server.connect(transport);
+  await transport.handleRequest(req, res);
 });
 
-app.post("/messages", async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const transport = transports[sessionId];
-  if (transport) {
-    await transport.handlePostMessage(req, res);
+app.get("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  if (sessionId && sessions.has(sessionId)) {
+    await sessions.get(sessionId).handleRequest(req, res);
+  } else {
+    res.status(400).json({ error: "No session. POST first." });
+  }
+});
+
+app.delete("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  if (sessionId && sessions.has(sessionId)) {
+    await sessions.get(sessionId).handleRequest(req, res);
+    sessions.delete(sessionId);
   } else {
     res.status(404).json({ error: "Session not found" });
   }
@@ -55,5 +76,5 @@ app.post("/messages", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`SAT-20 Ping Test running on port ${PORT}`);
+  console.log(`SAT-20 Ping Test (Streamable HTTP) running on port ${PORT}`);
 });
